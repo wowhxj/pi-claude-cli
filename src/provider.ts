@@ -35,6 +35,11 @@ import {
   registerProcess,
   cleanupSystemPromptFile,
 } from "./process-manager.js";
+import { parseLine } from "./stream-parser.js";
+import { createEventBridge } from "./event-bridge.js";
+import { handleControlRequest } from "./control-handler.js";
+import { mapThinkingEffort } from "./thinking-config.js";
+import { isPiKnownClaudeTool } from "./tool-mapping.js";
 
 export const CLAUDE_AUTO_COMPACT_THRESHOLD_CHARS = 64_000;
 
@@ -54,11 +59,6 @@ interface ClaudeSessionState {
  * session is created and remembered here for subsequent --resume calls.
  */
 const claudeSessionStates = new Map<string, ClaudeSessionState>();
-import { parseLine } from "./stream-parser.js";
-import { createEventBridge } from "./event-bridge.js";
-import { handleControlRequest } from "./control-handler.js";
-import { mapThinkingEffort } from "./thinking-config.js";
-import { isPiKnownClaudeTool } from "./tool-mapping.js";
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
 const INACTIVITY_TIMEOUT_MS = 180_000;
 
@@ -251,11 +251,18 @@ export function streamViaCli(
       // resume after a successful response from this exact Claude model.
       // The provider-facing transcript contains a leading system message, so
       // context.messages.length is not a reliable first-turn check.
-      const { resumeSessionId, newSessionId } = getClaudeSessionPlan(
-        context.messages,
-        model.id,
-        options?.sessionId,
-      );
+      // Pi uses cacheRetention: "none" for one-off compaction summaries.
+      // Do not attach those requests to the persistent Claude session: an
+      // automatic pre-Claude compaction must not consume the same session ID
+      // that the real post-compaction request is about to initialize.
+      const { resumeSessionId, newSessionId } =
+        options?.cacheRetention === "none"
+          ? {}
+          : getClaudeSessionPlan(
+              context.messages,
+              model.id,
+              options?.sessionId,
+            );
 
       // Build prompt: if resuming, only send the latest user turn;
       // otherwise build the full flattened conversation history. A Pi

@@ -1963,6 +1963,37 @@ describe("streamViaCli", () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
+    it("does not persist one-off compaction summary requests", async () => {
+      const model = mockModels[0] as any;
+      const context = {
+        messages: [
+          { role: "user", content: "summarize this" },
+          {
+            role: "assistant",
+            api: "pi-claude-cli",
+            provider: "pi-claude-cli",
+            model: model.id,
+            content: "prior response",
+          },
+          { role: "user", content: "summary instructions" },
+        ],
+      };
+
+      streamViaCli(model, context, {
+        sessionId: "sess-summary",
+        cacheRetention: "none",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
     it("passes --session-id on first turn when sessionId provided", async () => {
       const model = mockModels[0] as any;
       const context = {
