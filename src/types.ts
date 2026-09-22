@@ -9,9 +9,12 @@ export interface ClaudeStreamEventMessage {
 
 export interface ClaudeResultMessage {
   type: "result";
-  subtype: "success" | "error";
+  // Claude CLI 2.x uses values such as error_during_execution in addition
+  // to success. Keep this open-ended so non-success results are surfaced.
+  subtype: string;
   result?: string;
   error?: string;
+  errors?: string[];
   session_id?: string;
 }
 

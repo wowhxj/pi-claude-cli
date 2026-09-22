@@ -361,6 +361,18 @@ export function buildSystemPrompt(
 
   if (context.systemPrompt) {
     parts.push(context.systemPrompt);
+  } else {
+    // Current pi-ai normalizes provider contexts by folding systemPrompt and
+    // tools into a leading system message. Recover that prompt here so the
+    // Claude CLI receives it instead of silently dropping it.
+    const initialMessage = context.messages[0];
+    if (
+      initialMessage?.role === "system" &&
+      typeof initialMessage.content === "string" &&
+      initialMessage.content
+    ) {
+      parts.push(initialMessage.content);
+    }
   }
 
   // Look for AGENTS.md

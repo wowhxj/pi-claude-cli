@@ -144,6 +144,55 @@ describe("streamViaCli", () => {
     expect(result.end).toBeDefined();
   });
 
+  it("does not resume on the first turn when pi prepends a system message", async () => {
+    const model = { ...mockModels[0], provider: "pi-claude-cli" } as any;
+    const context = {
+      messages: [
+        { role: "system", content: "Be helpful" },
+        { role: "user", content: "Hello" },
+      ],
+    };
+
+    streamViaCli(model, context, { sessionId: "pi-session" } as any);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).not.toContain("--resume");
+    expect(args).toContain("--session-id");
+
+    const proc = (spawn as any).mock.results[0].value;
+    proc.stdout.end();
+    await vi.advanceTimersByTimeAsync(100);
+  });
+
+  it("does not resume a Codex turn after switching to Claude", async () => {
+    const model = { ...mockModels[0], provider: "pi-claude-cli" } as any;
+    const context = {
+      messages: [
+        { role: "system", content: "Be helpful" },
+        { role: "user", content: "Earlier" },
+        {
+          role: "assistant",
+          provider: "openai-codex",
+          model: "gpt-5.6-luna",
+          content: [{ type: "text", text: "Earlier answer" }],
+        },
+        { role: "user", content: "Now use Claude" },
+      ],
+    };
+
+    streamViaCli(model, context, { sessionId: "pi-session" } as any);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).not.toContain("--resume");
+    expect(args).toContain("--session-id");
+
+    const proc = (spawn as any).mock.results[0].value;
+    proc.stdout.end();
+    await vi.advanceTimersByTimeAsync(100);
+  });
+
   it("spawns subprocess and writes user message to stdin", async () => {
     const model = mockModels[0] as any;
     const context = {
@@ -287,6 +336,32 @@ describe("streamViaCli", () => {
     expect(doneEvent).toBeDefined();
     expect(doneEvent.message.content).toBeDefined();
     expect(mockStream.end).toHaveBeenCalled();
+  });
+
+  it("surfaces error_during_execution instead of returning empty output", async () => {
+    const model = mockModels[0] as any;
+    streamViaCli(model, { messages: [{ role: "user", content: "Hello" }] });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const proc = (spawn as any).mock.results[0].value;
+    proc.stdout.write(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        errors: ["No conversation found with session ID: test"],
+      }) + "\n",
+    );
+    proc.stdout.end();
+    await vi.advanceTimersByTimeAsync(100);
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const doneEvent = mockStream._events.find(
+      (e: any) => e.type === "done" && e.message,
+    );
+    expect(doneEvent).toBeDefined();
+    expect(doneEvent.message.content[0].text).toContain(
+      "No conversation found with session ID: test",
+    );
   });
 
   it("calls cleanupProcess after receiving result", async () => {
@@ -1792,7 +1867,13 @@ describe("streamViaCli", () => {
       const context = {
         messages: [
           { role: "user", content: "Hello" },
-          { role: "assistant", content: "Hi" },
+          {
+            role: "assistant",
+            api: "pi-claude-cli",
+            provider: "pi-claude-cli",
+            model: model.id,
+            content: "Hi",
+          },
           { role: "user", content: "Follow-up" },
         ],
       };
@@ -1856,7 +1937,13 @@ describe("streamViaCli", () => {
       const context = {
         messages: [
           { role: "user", content: "first message" },
-          { role: "assistant", content: "response" },
+          {
+            role: "assistant",
+            api: "pi-claude-cli",
+            provider: "pi-claude-cli",
+            model: model.id,
+            content: "response",
+          },
           { role: "user", content: "follow-up" },
         ],
       };
@@ -1880,7 +1967,13 @@ describe("streamViaCli", () => {
       const context = {
         messages: [
           { role: "user", content: "Hello" },
-          { role: "assistant", content: "Hi" },
+          {
+            role: "assistant",
+            api: "pi-claude-cli",
+            provider: "pi-claude-cli",
+            model: model.id,
+            content: "Hi",
+          },
           { role: "user", content: "follow-up" },
         ],
         systemPrompt: "Be helpful",

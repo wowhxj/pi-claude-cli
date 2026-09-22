@@ -42,6 +42,52 @@ import { isPiKnownClaudeTool } from "./tool-mapping.js";
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
 const INACTIVITY_TIMEOUT_MS = 180_000;
 
+/**
+ * Return true when a message contains a usable assistant response.
+ * Empty assistant messages are how pi records a failed provider turn.
+ */
+function hasMessageContent(content: unknown): boolean {
+  if (typeof content === "string") return content.trim().length > 0;
+  return Array.isArray(content) && content.length > 0;
+}
+
+/**
+ * Resume only a Claude CLI session that this provider actually created.
+ *
+ * Pi prepends a system message before calling providers, so message-count
+ * heuristics such as `messages.length > 1` mistake the first [system, user]
+ * turn for a follow-up. Provider/model matching also prevents a Codex turn
+ * from being used as evidence that a Claude CLI session exists.
+ */
+function hasPriorClaudeTurn(messages: any[], modelId: string): boolean {
+  return messages.some(
+    (message) =>
+      message?.role === "assistant" &&
+      (message.api === "pi-claude-cli" ||
+        message.provider === "pi-claude-cli") &&
+      message.model === modelId &&
+      hasMessageContent(message.content),
+  );
+}
+
+function getResultErrorMessage(message: {
+  subtype?: string;
+  error?: string;
+  errors?: string[];
+  result?: string;
+}): string {
+  const details = [
+    message.error,
+    ...(Array.isArray(message.errors) ? message.errors : []),
+  ].filter((value): value is string => Boolean(value?.trim()));
+
+  return (
+    details.join("; ") ||
+    message.result ||
+    `Claude CLI returned ${message.subtype ?? "an error"}`
+  );
+}
+
 /** Extended stream options: pi's SimpleStreamOptions plus optional cwd and mcpConfigPath */
 type StreamViaCLiOptions = SimpleStreamOptions & {
   cwd?: string;
@@ -81,11 +127,12 @@ export function streamViaCli(
     try {
       const cwd = options?.cwd ?? process.cwd();
 
-      // Resume if pi provides a session ID AND this isn't the first turn.
-      // Pi passes sessionId on every call (including first), but we can only
-      // --resume a CLI session that already exists on disk from a prior turn.
+      // Pi passes sessionId on every call, including the first turn. Only
+      // resume after a successful response from this exact Claude model.
+      // The provider-facing transcript contains a leading system message, so
+      // context.messages.length is not a reliable first-turn check.
       const resumeSessionId =
-        options?.sessionId && context.messages.length > 1
+        options?.sessionId && hasPriorClaudeTurn(context.messages, model.id)
           ? options.sessionId
           : undefined;
 
@@ -271,8 +318,11 @@ export function streamViaCli(
         } else if (msg.type === "control_request") {
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {
-          if (msg.subtype === "error") {
-            endStreamWithError(msg.error ?? "Unknown error from Claude CLI");
+          // Claude CLI 2.x uses several non-success subtypes, including
+          // error_during_execution. Treat every subtype other than success as
+          // an error; otherwise pi receives an empty successful response.
+          if (msg.subtype !== "success") {
+            endStreamWithError(getResultErrorMessage(msg));
           }
           // For both success and error: clean up the subprocess
           clearTimeout(inactivityTimer);
