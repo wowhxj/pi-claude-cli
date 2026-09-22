@@ -1962,6 +1962,69 @@ describe("streamViaCli", () => {
       await vi.advanceTimersByTimeAsync(100);
     });
 
+    it("starts a fresh session after Pi compaction and sends the summary", async () => {
+      const model = mockModels[0] as any;
+      const summary =
+        "The conversation history before this point was compacted into the following summary:\n\n<summary>\nImportant prior work\n</summary>";
+      const context = {
+        messages: [
+          { role: "user", content: "old history" },
+          {
+            role: "assistant",
+            api: "pi-claude-cli",
+            provider: "pi-claude-cli",
+            model: model.id,
+            content: "previous response",
+          },
+          { role: "user", content: summary },
+          { role: "user", content: "follow-up after compact" },
+        ],
+        systemPrompt: "Be helpful",
+      };
+
+      streamViaCli(model, context, {
+        sessionId: "sess-compaction-abc",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const firstArgs = (spawn as any).mock.calls[0][1] as string[];
+      expect(firstArgs).not.toContain("--resume");
+      expect(firstArgs).toContain("--session-id");
+      const sessionIndex = firstArgs.indexOf("--session-id");
+      const freshSessionId = firstArgs[sessionIndex + 1];
+      expect(freshSessionId).not.toBe("sess-compaction-abc");
+
+      const firstProc = (spawn as any).mock.results[0].value;
+      const firstWritten = firstProc.stdin.write.mock.calls[0][0] as string;
+      const firstParsed = JSON.parse(firstWritten.trim());
+      expect(firstParsed.message.content).toContain("Important prior work");
+      expect(firstParsed.message.content).toContain("follow-up after compact");
+
+      // Once the new session exists, the same compaction marker resumes it
+      // rather than creating another Claude conversation.
+      const nextContext = {
+        ...context,
+        messages: [
+          ...context.messages.slice(0, -1),
+          { role: "user", content: "next follow-up" },
+        ],
+      };
+      streamViaCli(model, nextContext, {
+        sessionId: "sess-compaction-abc",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const secondArgs = (spawn as any).mock.calls[1][1] as string[];
+      expect(secondArgs).toContain("--resume");
+      const resumeIndex = secondArgs.indexOf("--resume");
+      expect(secondArgs[resumeIndex + 1]).toBe(freshSessionId);
+
+      const secondProc = (spawn as any).mock.results[1].value;
+      firstProc.stdout.end();
+      secondProc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
     it("does not pass system prompt when resuming", async () => {
       const model = mockModels[0] as any;
       const context = {

@@ -14,6 +14,7 @@
  *    streamEnded guard, abort via SIGKILL, process registry
  */
 
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import {
   AssistantMessageEventStream,
@@ -34,6 +35,23 @@ import {
   registerProcess,
   cleanupSystemPromptFile,
 } from "./process-manager.js";
+
+const PI_COMPACTION_SUMMARY_PREFIX =
+  "The conversation history before this point was compacted into the following summary:";
+
+interface ClaudeSessionState {
+  sessionId: string;
+  compactionMarker?: string;
+}
+
+/**
+ * Maps a Pi session/model pair to the Claude CLI session currently backing it.
+ *
+ * Normally both IDs are the same. After Pi compacts its context, the old
+ * Claude conversation cannot be compacted by this provider, so a fresh Claude
+ * session is created and remembered here for subsequent --resume calls.
+ */
+const claudeSessionStates = new Map<string, ClaudeSessionState>();
 import { parseLine } from "./stream-parser.js";
 import { createEventBridge } from "./event-bridge.js";
 import { handleControlRequest } from "./control-handler.js";
@@ -68,6 +86,94 @@ function hasPriorClaudeTurn(messages: any[], modelId: string): boolean {
       message.model === modelId &&
       hasMessageContent(message.content),
   );
+}
+
+function messageContentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .filter((block) => block?.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n");
+}
+
+/**
+ * Return a stable marker for the latest Pi compaction summary, if present.
+ * Pi converts compactionSummary messages to user messages before providers see
+ * them, so detect the prefix emitted by pi's message transformer as well as
+ * the raw custom role for compatibility with future Pi versions.
+ */
+function getCompactionMarker(messages: any[]): string | undefined {
+  let marker: string | undefined;
+
+  for (const message of messages) {
+    if (message?.role === "compactionSummary") {
+      marker = JSON.stringify(message);
+      continue;
+    }
+
+    if (message?.role !== "user") continue;
+    const text = messageContentToText(message.content);
+    if (text.startsWith(PI_COMPACTION_SUMMARY_PREFIX)) {
+      marker = text;
+    }
+  }
+
+  return marker;
+}
+
+function getSessionKey(
+  sessionId: string | undefined,
+  modelId: string,
+): string | undefined {
+  return sessionId ? `${sessionId}\u0000${modelId}` : undefined;
+}
+
+function getClaudeSessionPlan(
+  messages: any[],
+  modelId: string,
+  piSessionId: string | undefined,
+): {
+  resumeSessionId?: string;
+  newSessionId?: string;
+} {
+  const key = getSessionKey(piSessionId, modelId);
+  const marker = getCompactionMarker(messages);
+  const state = key ? claudeSessionStates.get(key) : undefined;
+
+  if (marker) {
+    // A new marker means Pi compacted again. Start a new Claude conversation
+    // so the old, un-compacted Claude transcript is not retained forever.
+    if (!state || state.compactionMarker !== marker) {
+      const newSessionId = hasPriorClaudeTurn(messages, modelId)
+        ? randomUUID()
+        : (piSessionId ?? randomUUID());
+
+      if (key) {
+        claudeSessionStates.set(key, {
+          sessionId: newSessionId,
+          compactionMarker: marker,
+        });
+      }
+
+      return { newSessionId };
+    }
+
+    return { resumeSessionId: state.sessionId };
+  }
+
+  if (hasPriorClaudeTurn(messages, modelId)) {
+    return {
+      resumeSessionId: state?.sessionId ?? piSessionId,
+    };
+  }
+
+  const newSessionId = piSessionId;
+  if (key && newSessionId) {
+    claudeSessionStates.set(key, { sessionId: newSessionId });
+  }
+  return { newSessionId };
 }
 
 function getResultErrorMessage(message: {
@@ -131,13 +237,16 @@ export function streamViaCli(
       // resume after a successful response from this exact Claude model.
       // The provider-facing transcript contains a leading system message, so
       // context.messages.length is not a reliable first-turn check.
-      const resumeSessionId =
-        options?.sessionId && hasPriorClaudeTurn(context.messages, model.id)
-          ? options.sessionId
-          : undefined;
+      const { resumeSessionId, newSessionId } = getClaudeSessionPlan(
+        context.messages,
+        model.id,
+        options?.sessionId,
+      );
 
       // Build prompt: if resuming, only send the latest user turn;
-      // otherwise build the full flattened conversation history
+      // otherwise build the full flattened conversation history. A Pi
+      // compaction always takes the new-session path, so the summary and the
+      // messages retained after it become Claude's initial context.
       const prompt = resumeSessionId
         ? buildResumePrompt(context)
         : buildPrompt(context);
@@ -159,7 +268,7 @@ export function streamViaCli(
         effort,
         mcpConfigPath: options?.mcpConfigPath,
         resumeSessionId,
-        newSessionId: !resumeSessionId ? options?.sessionId : undefined,
+        newSessionId,
       });
       const getStderr = captureStderr(proc);
 
