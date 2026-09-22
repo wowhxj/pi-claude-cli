@@ -7,7 +7,13 @@
 
 import { getModels } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { streamViaCli } from "./src/provider.js";
+import {
+  CLAUDE_AUTO_COMPACT_THRESHOLD_CHARS,
+  estimateContextChars,
+  hasCompactionSummary,
+  hasPriorClaudeTurn,
+  streamViaCli,
+} from "./src/provider.js";
 import {
   validateCliPresence,
   validateCliAuth,
@@ -22,6 +28,7 @@ const PROVIDER_ID = "pi-claude-cli";
 
 let mcpConfigPath: string | undefined;
 let mcpConfigResolved = false;
+let autoCompactionInProgress = false;
 
 /**
  * Lazily generate MCP config on first request (not at load time).
@@ -87,6 +94,63 @@ export default function (pi: ExtensionAPI) {
       const allTools = pi.getAllTools();
       if (Array.isArray(allTools)) {
         pi.setActiveTools(allTools.map((t: any) => t.name));
+      }
+    });
+
+    // A model switch into Claude otherwise sends the entire Pi history as the
+    // first Claude prompt. Compact that history before the provider request
+    // when it is large enough to make the first request expensive.
+    pi.on("context", async (event, ctx) => {
+      const model = ctx.model;
+      if (
+        autoCompactionInProgress ||
+        model?.provider !== PROVIDER_ID ||
+        hasPriorClaudeTurn(event.messages, model.id) ||
+        hasCompactionSummary(event.messages) ||
+        estimateContextChars(event.messages) <=
+          CLAUDE_AUTO_COMPACT_THRESHOLD_CHARS
+      ) {
+        return;
+      }
+
+      autoCompactionInProgress = true;
+      console.error(
+        `[pi-claude-cli] Compacting ${estimateContextChars(event.messages).toLocaleString()} characters before the first Claude request`,
+      );
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          ctx.compact({
+            onComplete: () => resolve(),
+            onError: reject,
+          });
+        });
+
+        // compact() updates the append-only session. Return its fresh,
+        // compaction-aware messages to the current LLM turn instead of the
+        // pre-compaction snapshot that triggered this handler.
+        const refreshedContext = (
+          ctx.sessionManager as typeof ctx.sessionManager & {
+            buildSessionContext?: () => { messages: any[] };
+          }
+        ).buildSessionContext?.();
+
+        if (refreshedContext?.messages) {
+          return { messages: refreshedContext.messages };
+        }
+
+        console.warn(
+          "[pi-claude-cli] Pi did not expose the refreshed compacted context; continuing with the original context",
+        );
+        return;
+      } catch (error) {
+        console.warn(
+          "[pi-claude-cli] Automatic pre-Claude compaction failed; continuing with the original context:",
+          error,
+        );
+        return;
+      } finally {
+        autoCompactionInProgress = false;
       }
     });
 

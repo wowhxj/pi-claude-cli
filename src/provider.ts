@@ -36,6 +36,8 @@ import {
   cleanupSystemPromptFile,
 } from "./process-manager.js";
 
+export const CLAUDE_AUTO_COMPACT_THRESHOLD_CHARS = 64_000;
+
 const PI_COMPACTION_SUMMARY_PREFIX =
   "The conversation history before this point was compacted into the following summary:";
 
@@ -77,7 +79,7 @@ function hasMessageContent(content: unknown): boolean {
  * turn for a follow-up. Provider/model matching also prevents a Codex turn
  * from being used as evidence that a Claude CLI session exists.
  */
-function hasPriorClaudeTurn(messages: any[], modelId: string): boolean {
+export function hasPriorClaudeTurn(messages: any[], modelId: string): boolean {
   return messages.some(
     (message) =>
       message?.role === "assistant" &&
@@ -104,6 +106,18 @@ function messageContentToText(content: unknown): string {
  * them, so detect the prefix emitted by pi's message transformer as well as
  * the raw custom role for compatibility with future Pi versions.
  */
+export function hasCompactionSummary(messages: any[]): boolean {
+  return getCompactionMarker(messages) !== undefined;
+}
+
+export function estimateContextChars(messages: any[]): number {
+  try {
+    return JSON.stringify(messages).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
 function getCompactionMarker(messages: any[]): string | undefined {
   let marker: string | undefined;
 

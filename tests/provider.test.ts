@@ -119,6 +119,77 @@ describe("provider registration (default export)", () => {
     expect(firstModel.maxTokens).toBe(8192);
     expect(firstModel.cost).toBeDefined();
   });
+
+  it("compacts oversized context before the first Claude request", async () => {
+    const registerProvider = vi.fn();
+    const on = vi.fn();
+    const mockPi = {
+      registerProvider,
+      on,
+      getAllTools: vi.fn(() => []),
+      setActiveTools: vi.fn(),
+    } as any;
+
+    const mod = await import("../index");
+    mod.default(mockPi);
+
+    const contextHandler = on.mock.calls.find(
+      ([eventName]: any[]) => eventName === "context",
+    )?.[1];
+    expect(contextHandler).toBeDefined();
+
+    const compactedMessages = [
+      {
+        role: "compactionSummary",
+        summary: "Important retained context",
+      },
+    ];
+    const compact = vi.fn((options: any) => options.onComplete?.({}));
+
+    const result = await contextHandler(
+      {
+        messages: [{ role: "user", content: "x".repeat(65_000) }],
+      },
+      {
+        model: {
+          ...mockModels[0],
+          provider: "pi-claude-cli",
+        },
+        compact,
+        sessionManager: {
+          buildSessionContext: () => ({ messages: compactedMessages }),
+        },
+      },
+    );
+
+    expect(compact).toHaveBeenCalledTimes(1);
+    expect(result.messages).toEqual(compactedMessages);
+
+    await contextHandler(
+      {
+        messages: [
+          { role: "user", content: "x".repeat(65_000) },
+          {
+            role: "assistant",
+            provider: "pi-claude-cli",
+            model: mockModels[0].id,
+            content: "Already used Claude",
+          },
+        ],
+      },
+      {
+        model: {
+          ...mockModels[0],
+          provider: "pi-claude-cli",
+        },
+        compact,
+        sessionManager: {
+          buildSessionContext: () => ({ messages: compactedMessages }),
+        },
+      },
+    );
+    expect(compact).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("streamViaCli", () => {
